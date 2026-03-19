@@ -1,0 +1,3 @@
+bioinfo_env/ 
+*.fastq 
+__pycache__/ 
