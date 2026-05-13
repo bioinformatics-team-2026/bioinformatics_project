@@ -1,0 +1,105 @@
+from Bio.SeqUtils import gc_fraction
+import numpy as np
+from fastq_parser import parse_fastq
+from pathlib import Path
+from datetime import datetime
+
+def get_gc_content(sequence):
+    return gc_fraction(sequence) * 100
+
+def check_quality_thresholds(qualities):
+    q_array = np.array(qualities)
+    q20_count = np.sum(q_array >= 20)
+    q30_count = np.sum(q_array >= 30)
+    return q20_count, q30_count
+
+def update_per_base_quality(qualities, sums, counts):
+    for i, q in enumerate(qualities):
+        if i >= len(sums):
+            sums.append(0.0)
+            counts.append(0)
+        sums[i] += q
+        counts[i] += 1
+    return sums, counts
+
+def compute_qc_stats(filepath):
+    filepath = Path(filepath)
+    read_lengths = []
+    all_qualities = []
+    total_gc_bases = 0
+    total_bases = 0
+    total_q20 = 0
+    total_q30 = 0
+    pos_sums, pos_counts = [], []
+
+    for read in parse_fastq(filepath):
+        seq = read.sequence
+        quals = read.quality_scores
+        read_len = len(seq)
+        read_lengths.append(read_len)
+        total_bases += read_len
+        all_qualities.extend(quals)
+        total_gc_bases += (get_gc_content(seq) / 100) * read_len
+        q20, q30 = check_quality_thresholds(quals)
+        total_q20 += q20
+        total_q30 += q30
+        pos_sums, pos_counts = update_per_base_quality(quals, pos_sums, pos_counts)
+
+    if total_bases == 0:
+        return None
+
+    per_base_quality = [round(s / c, 2) for s, c in zip(pos_sums, pos_counts)]
+
+    return {
+        "filename": filepath.name,
+        "total_reads": len(read_lengths),
+        "avg_read_length": round(np.mean(read_lengths), 2),
+        "min_read_length": int(np.min(read_lengths)),
+        "max_read_length": int(np.max(read_lengths)),
+        "avg_quality_score": round(np.mean(all_qualities), 2),
+        "gc_content_percent": round((total_gc_bases / total_bases) * 100, 2),
+        "q20_percent": round((total_q20 / total_bases) * 100, 2),
+        "q30_percent": round((total_q30 / total_bases) * 100, 2),
+        "per_base_quality": per_base_quality,
+    }
+
+def generate_qc_report(stats, output_path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "============================================================",
+        " FASTQ Quality Control Report ",
+        f" Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "============================================================",
+        f"\n[File Information]",
+        f"File Name: {stats['filename']}",
+        f"Total Reads: {stats['total_reads']:,}",
+        f"Avg Read Length: {stats['avg_read_length']} bp",
+        f"Length Range: {stats['min_read_length']} - {stats['max_read_length']} bp",
+        f"\n[Quality Metrics]",
+        f"Avg Quality Score: {stats['avg_quality_score']} (Phred)",
+        f"GC Content: {stats['gc_content_percent']}%",
+        f"Q20 Bases: {stats['q20_percent']}%",
+        f"Q30 Bases: {stats['q30_percent']}%",
+        f"\n[Per-Base Quality (First 15 positions)]",
+    ]
+    pbq = stats.get("per_base_quality", [])
+    for i, q in enumerate(pbq[:15]):
+        lines.append(f" Position {i+1:>3}: {q}")
+    lines.append("\n" + "="*60)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"Report saved: {output_path.name}")
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python quality_control.py <fastq_file_or_directory>")
+        sys.exit(1)
+    target = Path(sys.argv[1])
+    if target.is_file():
+        res = compute_qc_stats(target)
+        if res:
+            generate_qc_report(res, f"{target.stem}_report.txt")
+    else:
+        print(f"Error: {target} not found")
